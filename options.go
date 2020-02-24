@@ -1,6 +1,10 @@
 package gev
 
-import "time"
+import (
+	"time"
+
+	"github.com/Allenxuxu/gev/connection"
+)
 
 // Options 服务配置
 type Options struct {
@@ -11,6 +15,8 @@ type Options struct {
 
 	tick      time.Duration
 	wheelSize int64
+	IdleTime  time.Duration
+	Protocol  connection.Protocol
 }
 
 // Option ...
@@ -34,6 +40,9 @@ func newOptions(opt ...Option) *Options {
 	}
 	if opts.wheelSize == 0 {
 		opts.wheelSize = 1000
+	}
+	if opts.Protocol == nil {
+		opts.Protocol = &connection.DefaultProtocol{}
 	}
 
 	return &opts
@@ -64,5 +73,19 @@ func Address(a string) Option {
 func NumLoops(n int) Option {
 	return func(o *Options) {
 		o.NumLoops = n
+	}
+}
+
+// Protocol 数据包处理
+func Protocol(p connection.Protocol) Option {
+	return func(o *Options) {
+		o.Protocol = p
+	}
+}
+
+// IdleTime 最大空闲时间（秒）
+func IdleTime(t time.Duration) Option {
+	return func(o *Options) {
+		o.IdleTime = t
 	}
 }

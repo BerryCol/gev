@@ -3,12 +3,12 @@ on: [push,pull_request]
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
     steps:
-    - name: Set up Go 1.12
+    - name: Set up Go 1.13
       uses: actions/setup-go@v1
       with:
-        go-version: 1.12
+        go-version: 1.13
       id: go
     - name: Code
       uses: actions/checkout@v1
@@ -18,17 +18,17 @@ jobs:
       run: ./golangci-lint run ./... --skip-dirs benchmarks
       
   test:
-    needs: Lint
+#    needs: Lint
     name: Unit Testing
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macOS-10.14,ubuntu-18.04]
+        os: [macOS-latest,ubuntu-latest]
     steps:
-    - name: Set up Go 1.12
+    - name: Set up Go 1.13
       uses: actions/setup-go@v1
       with:
-        go-version: 1.12
+        go-version: 1.13
       id: go
     - name: Code
       uses: actions/checkout@v1

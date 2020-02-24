@@ -2,32 +2,26 @@ package main
 
 import (
 	"flag"
+	"log"
 	"strconv"
-	"time"
 
 	"github.com/Allenxuxu/gev"
 	"github.com/Allenxuxu/gev/connection"
-	"github.com/Allenxuxu/gev/log"
-	"github.com/Allenxuxu/toolkit/sync/atomic"
 )
 
-type example struct {
-	Count atomic.Int64
-}
+type example struct{}
 
 func (s *example) OnConnect(c *connection.Connection) {
-	s.Count.Add(1)
-	//log.Println(" OnConnect ： ", c.PeerAddr())
+	log.Println(" OnConnect ： ", c.PeerAddr())
 }
 func (s *example) OnMessage(c *connection.Connection, ctx interface{}, data []byte) (out []byte) {
-	//log.Println("OnMessage")
+	log.Println("OnMessage：", data)
 	out = data
 	return
 }
 
 func (s *example) OnClose(c *connection.Connection) {
-	s.Count.Add(-1)
-	//log.Println("OnClose")
+	log.Println("OnClose")
 }
 
 func main() {
@@ -42,14 +36,12 @@ func main() {
 	s, err := gev.NewServer(handler,
 		gev.Network("tcp"),
 		gev.Address(":"+strconv.Itoa(port)),
-		gev.NumLoops(loops))
+		gev.NumLoops(loops),
+		gev.Protocol(&ExampleProtocol{}))
 	if err != nil {
 		panic(err)
 	}
 
-	s.RunEvery(time.Second*2, func() {
-		log.Info("connections :", handler.Count.Get())
-	})
-
+	log.Println("server start")
 	s.Start()
 }

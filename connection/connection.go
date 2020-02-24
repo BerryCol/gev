@@ -5,16 +5,21 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/Allenxuxu/gev/eventloop"
+	"github.com/Allenxuxu/gev/log"
 	"github.com/Allenxuxu/gev/poller"
 	"github.com/Allenxuxu/ringbuffer"
+	"github.com/Allenxuxu/ringbuffer/pool"
 	"github.com/Allenxuxu/toolkit/sync/atomic"
+	"github.com/RussellLuo/timingwheel"
+	"github.com/gobwas/pool/pbytes"
 	"golang.org/x/sys/unix"
 )
 
 // ReadCallback 数据可读回调函数
-type ReadCallback func(c *Connection, buffer *ringbuffer.RingBuffer) []byte
+type ReadCallback func(c *Connection, ctx interface{}, data []byte) []byte
 
 // CloseCallback 关闭回调函数
 type CloseCallback func(c *Connection)
@@ -30,22 +35,50 @@ type Connection struct {
 	loop          *eventloop.EventLoop
 	peerAddr      string
 	ctx           interface{}
+
+	idleTime    time.Duration
+	activeTime  atomic.Int64
+	timingWheel *timingwheel.TimingWheel
+
+	protocol Protocol
 }
 
+var ErrConnectionClosed = errors.New("connection closed")
+
 // New 创建 Connection
-func New(fd int, loop *eventloop.EventLoop, sa *unix.Sockaddr, readCb ReadCallback, closeCb CloseCallback) *Connection {
+func New(fd int, loop *eventloop.EventLoop, sa *unix.Sockaddr, protocol Protocol, tw *timingwheel.TimingWheel, idleTime time.Duration, readCb ReadCallback, closeCb CloseCallback) *Connection {
 	conn := &Connection{
 		fd:            fd,
 		peerAddr:      sockaddrToString(sa),
-		outBuffer:     ringbuffer.New(1024),
-		inBuffer:      ringbuffer.New(1024),
+		outBuffer:     pool.Get(),
+		inBuffer:      pool.Get(),
 		readCallback:  readCb,
 		closeCallback: closeCb,
 		loop:          loop,
+		idleTime:      idleTime,
+		timingWheel:   tw,
+		protocol:      protocol,
 	}
 	conn.connected.Set(true)
 
+	if conn.idleTime > 0 {
+		_ = conn.activeTime.Swap(int(time.Now().Unix()))
+		conn.timingWheel.AfterFunc(conn.idleTime, conn.closeTimeoutConn())
+	}
+
 	return conn
+}
+
+func (c *Connection) closeTimeoutConn() func() {
+	return func() {
+		now := time.Now()
+		intervals := now.Sub(time.Unix(c.activeTime.Get(), 0))
+		if intervals >= c.idleTime {
+			_ = c.Close()
+		} else {
+			c.timingWheel.AfterFunc(c.idleTime-intervals, c.closeTimeoutConn())
+		}
+	}
 }
 
 // Context 获取 Context
@@ -71,11 +104,23 @@ func (c *Connection) Connected() bool {
 // Send 用来在非 loop 协程发送
 func (c *Connection) Send(buffer []byte) error {
 	if !c.connected.Get() {
-		return errors.New("connection closed")
+		return ErrConnectionClosed
 	}
 
 	c.loop.QueueInLoop(func() {
-		c.sendInLoop(buffer)
+		c.sendInLoop(c.protocol.Packet(c, buffer))
+	})
+	return nil
+}
+
+// Close 关闭连接
+func (c *Connection) Close() error {
+	if !c.connected.Get() {
+		return ErrConnectionClosed
+	}
+
+	c.loop.QueueInLoop(func() {
+		c.handleClose(c.fd)
 	})
 	return nil
 }
@@ -88,6 +133,10 @@ func (c *Connection) ShutdownWrite() error {
 
 // HandleEvent 内部使用，event loop 回调
 func (c *Connection) HandleEvent(fd int, events poller.Event) {
+	if c.idleTime > 0 {
+		_ = c.activeTime.Swap(int(time.Now().Unix()))
+	}
+
 	if events&poller.EventErr != 0 {
 		c.handleClose(fd)
 		return
@@ -102,20 +151,20 @@ func (c *Connection) HandleEvent(fd int, events poller.Event) {
 	}
 }
 
-//func debug(events poller.Event) string {
-//	var ret string
-//	if events&poller.EventErr != 0 {
-//		ret += "EventErr "
-//	}
-//	if events&poller.EventRead != 0 {
-//		ret += "EventRead "
-//	}
-//	if events&poller.EventWrite != 0 {
-//		ret += "EventWrite "
-//	}
-//
-//	return ret
-//}
+func (c *Connection) handlerProtocol(buffer *ringbuffer.RingBuffer) []byte {
+	// 在调用方函数里归还
+	out := pbytes.GetCap(1024)
+	ctx, receivedData := c.protocol.UnPacket(c, buffer)
+	for ctx != nil || len(receivedData) != 0 {
+		sendData := c.readCallback(c, ctx, receivedData)
+		if len(sendData) > 0 {
+			out = append(out, c.protocol.Packet(c, sendData)...)
+		}
+
+		ctx, receivedData = c.protocol.UnPacket(c, buffer)
+	}
+	return out
+}
 
 func (c *Connection) handleRead(fd int) {
 	// TODO 避免这次内存拷贝
@@ -130,7 +179,7 @@ func (c *Connection) handleRead(fd int) {
 
 	if c.inBuffer.Length() == 0 {
 		buffer := ringbuffer.NewWithData(buf[:n])
-		out := c.readCallback(c, buffer)
+		out := c.handlerProtocol(buffer)
 
 		if buffer.Length() > 0 {
 			first, _ := buffer.PeekAll()
@@ -139,12 +188,16 @@ func (c *Connection) handleRead(fd int) {
 		if len(out) != 0 {
 			c.sendInLoop(out)
 		}
+
+		pbytes.Put(out)
 	} else {
 		_, _ = c.inBuffer.Write(buf[:n])
-		out := c.readCallback(c, c.inBuffer)
+		out := c.handlerProtocol(c.inBuffer)
 		if len(out) != 0 {
 			c.sendInLoop(out)
 		}
+
+		pbytes.Put(out)
 	}
 }
 
@@ -173,16 +226,25 @@ func (c *Connection) handleWrite(fd int) {
 	}
 
 	if c.outBuffer.Length() == 0 {
-		_ = c.loop.EnableRead(fd)
+		if err := c.loop.EnableRead(fd); err != nil {
+			log.Error("[EnableRead]", err)
+		}
 	}
 }
 
 func (c *Connection) handleClose(fd int) {
-	c.connected.Set(false)
-	_ = unix.Close(fd)
-	c.loop.DeleteFdInLoop(fd)
+	if c.connected.Get() {
+		c.connected.Set(false)
+		c.loop.DeleteFdInLoop(fd)
 
-	c.closeCallback(c)
+		c.closeCallback(c)
+		if err := unix.Close(fd); err != nil {
+			log.Error("[close fd]", err)
+		}
+
+		pool.Put(c.inBuffer)
+		pool.Put(c.outBuffer)
+	}
 }
 
 func (c *Connection) sendInLoop(data []byte) {

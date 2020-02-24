@@ -8,16 +8,16 @@ import (
 	"github.com/Allenxuxu/gev/connection"
 	"github.com/Allenxuxu/gev/eventloop"
 	"github.com/Allenxuxu/gev/listener"
-	"github.com/Allenxuxu/ringbuffer"
-	"github.com/Allenxuxu/timingwheel.V2"
+	"github.com/Allenxuxu/gev/log"
 	"github.com/Allenxuxu/toolkit/sync"
+	"github.com/RussellLuo/timingwheel"
 	"golang.org/x/sys/unix"
 )
 
 // Handler Server 注册接口
 type Handler interface {
 	OnConnect(c *connection.Connection)
-	OnMessage(c *connection.Connection, buffer *ringbuffer.RingBuffer) []byte
+	OnMessage(c *connection.Connection, ctx interface{}, data []byte) []byte
 	OnClose(c *connection.Connection)
 }
 
@@ -48,7 +48,7 @@ func NewServer(handler Handler, opts ...Option) (server *Server, err error) {
 		return nil, err
 	}
 
-	l, err := listener.New(server.opts.Network, server.opts.Address, options.ReusePort, server.handleNewConnection)
+	l, err := listener.New(server.opts.Network, server.opts.Address, options.ReusePort, server.loop, server.handleNewConnection)
 	if err != nil {
 		return nil, err
 	}
@@ -76,12 +76,14 @@ func NewServer(handler Handler, opts ...Option) (server *Server, err error) {
 	return
 }
 
+// RunAfter 延时任务
 func (s *Server) RunAfter(d time.Duration, f func()) *timingwheel.Timer {
 	return s.timingWheel.AfterFunc(d, f)
 }
 
+// RunEvery 定时任务
 func (s *Server) RunEvery(d time.Duration, f func()) *timingwheel.Timer {
-	return s.timingWheel.EveryFunc(d, f)
+	return s.timingWheel.ScheduleFunc(&everyScheduler{Interval: d}, f)
 }
 
 func (s *Server) nextLoop() *eventloop.EventLoop {
@@ -94,11 +96,12 @@ func (s *Server) nextLoop() *eventloop.EventLoop {
 func (s *Server) handleNewConnection(fd int, sa *unix.Sockaddr) {
 	loop := s.nextLoop()
 
-	c := connection.New(fd, loop, sa, s.callback.OnMessage, s.callback.OnClose)
-
-	_ = loop.AddSocketAndEnableRead(fd, c)
+	c := connection.New(fd, loop, sa, s.opts.Protocol, s.timingWheel, s.opts.IdleTime, s.callback.OnMessage, s.callback.OnClose)
 
 	s.callback.OnConnect(c)
+	if err := loop.AddSocketAndEnableRead(fd, c); err != nil {
+		log.Error("[AddSocketAndEnableRead]", err)
+	}
 }
 
 // Start 启动 Server
@@ -118,9 +121,18 @@ func (s *Server) Start() {
 // Stop 关闭 Server
 func (s *Server) Stop() {
 	s.timingWheel.Stop()
-	_ = s.loop.Stop()
+	if err := s.loop.Stop(); err != nil {
+		log.Error(err)
+	}
 
 	for k := range s.workLoops {
-		_ = s.workLoops[k].Stop()
+		if err := s.workLoops[k].Stop(); err != nil {
+			log.Error(err)
+		}
 	}
+}
+
+// Options 返回 options
+func (s *Server) Options() Options {
+	return *s.opts
 }

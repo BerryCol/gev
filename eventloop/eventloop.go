@@ -1,16 +1,18 @@
 package eventloop
 
 import (
-	"log"
 	"sync"
 
+	"github.com/Allenxuxu/gev/log"
 	"github.com/Allenxuxu/gev/poller"
+	"github.com/Allenxuxu/toolkit/sync/atomic"
 	"github.com/Allenxuxu/toolkit/sync/spinlock"
 )
 
 // Socket 接口
 type Socket interface {
 	HandleEvent(fd int, events poller.Event)
+	Close() error
 }
 
 // EventLoop 事件循环
@@ -18,6 +20,8 @@ type EventLoop struct {
 	poll    *poller.Poller
 	sockets sync.Map
 	packet  []byte
+
+	eventHandling atomic.Bool
 
 	pendingFunc []func()
 	mu          spinlock.SpinLock
@@ -43,7 +47,9 @@ func (l *EventLoop) PacketBuf() []byte {
 
 // DeleteFdInLoop 删除 fd
 func (l *EventLoop) DeleteFdInLoop(fd int) {
-	_ = l.poll.Del(fd)
+	if err := l.poll.Del(fd); err != nil {
+		log.Error("[DeleteFdInLoop]", err)
+	}
 	l.sockets.Delete(fd)
 }
 
@@ -76,6 +82,17 @@ func (l *EventLoop) RunLoop() {
 
 // Stop 关闭事件循环
 func (l *EventLoop) Stop() error {
+	l.sockets.Range(func(key, value interface{}) bool {
+		s, ok := value.(Socket)
+		if !ok {
+			log.Error("value.(Socket) fail")
+		} else {
+			if err := s.Close(); err != nil {
+				log.Error(err)
+			}
+		}
+		return true
+	})
 	return l.poll.Close()
 }
 
@@ -85,20 +102,26 @@ func (l *EventLoop) QueueInLoop(f func()) {
 	l.pendingFunc = append(l.pendingFunc, f)
 	l.mu.Unlock()
 
-	if err := l.poll.Wake(); err != nil {
-		log.Println("QueueInLoop Wake loop, ", err)
+	if !l.eventHandling.Get() {
+		if err := l.poll.Wake(); err != nil {
+			log.Error("QueueInLoop Wake loop, ", err)
+		}
 	}
 }
 
 func (l *EventLoop) handlerEvent(fd int, events poller.Event) {
+	l.eventHandling.Set(true)
+
 	if fd != -1 {
 		s, ok := l.sockets.Load(fd)
 		if ok {
 			s.(Socket).HandleEvent(fd, events)
 		}
-	} else {
-		l.doPendingFunc()
 	}
+
+	l.eventHandling.Set(false)
+
+	l.doPendingFunc()
 }
 
 func (l *EventLoop) doPendingFunc() {

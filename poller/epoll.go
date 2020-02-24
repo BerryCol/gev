@@ -3,8 +3,7 @@
 package poller
 
 import (
-	"log"
-
+	"github.com/Allenxuxu/gev/log"
 	"github.com/Allenxuxu/toolkit/sync/atomic"
 	"golang.org/x/sys/unix"
 )
@@ -63,7 +62,7 @@ var buf = make([]byte, 8)
 func (ep *Poller) wakeHandlerRead() {
 	n, err := unix.Read(ep.eventFd, buf)
 	if err != nil || n != 8 {
-		log.Println("wakeHandlerRead", err, n)
+		log.Error("wakeHandlerRead", err, n)
 	}
 }
 
@@ -141,7 +140,7 @@ func (ep *Poller) Poll(handler func(fd int, event Event)) {
 		n, err := unix.EpollWait(ep.fd, events, -1)
 
 		if err != nil && err != unix.EINTR {
-			log.Println("EpollWait: ", err)
+			log.Error("EpollWait: ", err)
 			continue
 		}
 
@@ -162,10 +161,6 @@ func (ep *Poller) Poll(handler func(fd int, event Event)) {
 				handler(fd, rEvents)
 			} else {
 				ep.wakeHandlerRead()
-
-				if !ep.running.Get() {
-					return
-				}
 				wake = true
 			}
 		}
@@ -173,6 +168,9 @@ func (ep *Poller) Poll(handler func(fd int, event Event)) {
 		if wake {
 			handler(-1, 0)
 			wake = false
+			if !ep.running.Get() {
+				return
+			}
 		}
 
 		if n == len(events) {

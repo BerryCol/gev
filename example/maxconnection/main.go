@@ -5,16 +5,17 @@ import (
 
 	"github.com/Allenxuxu/gev"
 	"github.com/Allenxuxu/gev/connection"
-	"github.com/Allenxuxu/ringbuffer"
 	"github.com/Allenxuxu/toolkit/sync/atomic"
 )
 
+// Server example
 type Server struct {
 	clientNum     atomic.Int64
 	maxConnection int64
 	server        *gev.Server
 }
 
+// New server
 func New(ip, port string, maxConnection int64) (*Server, error) {
 	var err error
 	s := new(Server)
@@ -28,14 +29,17 @@ func New(ip, port string, maxConnection int64) (*Server, error) {
 	return s, nil
 }
 
+// Start server
 func (s *Server) Start() {
 	s.server.Start()
 }
 
+// Stop server
 func (s *Server) Stop() {
 	s.server.Stop()
 }
 
+// OnConnect callback
 func (s *Server) OnConnect(c *connection.Connection) {
 	s.clientNum.Add(1)
 	log.Println(" OnConnect ： ", c.PeerAddr())
@@ -46,17 +50,15 @@ func (s *Server) OnConnect(c *connection.Connection) {
 		return
 	}
 }
-func (s *Server) OnMessage(c *connection.Connection, buffer *ringbuffer.RingBuffer) (out []byte) {
+
+// OnMessage callback
+func (s *Server) OnMessage(c *connection.Connection, ctx interface{}, data []byte) (out []byte) {
 	log.Println("OnMessage")
-	first, end := buffer.PeekAll()
-	out = first
-	if len(end) > 0 {
-		out = append(out, end...)
-	}
-	buffer.RetrieveAll()
+	out = data
 	return
 }
 
+// OnClose callback
 func (s *Server) OnClose(c *connection.Connection) {
 	s.clientNum.Add(-1)
 	log.Println("OnClose")
